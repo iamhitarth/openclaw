@@ -534,17 +534,32 @@ export async function monitorWebInbox(options: {
   );
 
   void (async () => {
-    try {
-      const groups = await sock.groupFetchAllParticipating();
-      if (shouldLogVerbose()) {
-        logVerbose(`Hydrated ${Object.keys(groups ?? {}).length} participating groups on connect`);
+    const delaysMs = [0, 2000, 5000, 10000];
+    let lastError: unknown;
+    for (let attempt = 0; attempt < delaysMs.length; attempt++) {
+      if (delaysMs[attempt] > 0) {
+        await new Promise((r) => setTimeout(r, delaysMs[attempt]));
       }
-    } catch (err) {
-      const error = String(err);
-      inboundLogger.warn({ error }, "failed hydrating participating groups on connect");
-      inboundConsoleLog.warn(`Failed hydrating participating groups on connect: ${error}`);
-      logVerbose(`Failed to hydrate participating groups on connect: ${error}`);
+      try {
+        const groups = await sock.groupFetchAllParticipating();
+        if (shouldLogVerbose()) {
+          logVerbose(
+            `Hydrated ${Object.keys(groups ?? {}).length} participating groups on connect` +
+              (attempt > 0 ? ` (attempt ${attempt + 1})` : ""),
+          );
+        }
+        return;
+      } catch (err) {
+        lastError = err;
+        if (shouldLogVerbose()) {
+          logVerbose(`Group hydration attempt ${attempt + 1} failed: ${String(err)}`);
+        }
+      }
     }
+    const error = String(lastError);
+    inboundLogger.warn({ error }, "failed hydrating participating groups on connect");
+    inboundConsoleLog.warn(`Failed hydrating participating groups on connect: ${error}`);
+    logVerbose(`Failed to hydrate participating groups on connect: ${error}`);
   })();
 
   const sendApi = createWebSendApi({

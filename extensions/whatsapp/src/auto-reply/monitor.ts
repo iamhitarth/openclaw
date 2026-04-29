@@ -4,7 +4,7 @@ import { waitForever } from "openclaw/plugin-sdk/cli-runtime";
 import { hasControlCommand } from "openclaw/plugin-sdk/command-detection";
 import { enqueueSystemEvent } from "openclaw/plugin-sdk/infra-runtime";
 import { DEFAULT_GROUP_HISTORY_LIMIT } from "openclaw/plugin-sdk/reply-history";
-import { resolveAgentRoute } from "openclaw/plugin-sdk/routing";
+import { buildGroupHistoryKey, resolveAgentRoute } from "openclaw/plugin-sdk/routing";
 import { logVerbose } from "openclaw/plugin-sdk/runtime-env";
 import { registerUnhandledRejectionHandler } from "openclaw/plugin-sdk/runtime-env";
 import { getChildLogger } from "openclaw/plugin-sdk/runtime-env";
@@ -73,6 +73,158 @@ function loadReplyResolverRuntime() {
   return replyResolverRuntimePromise;
 }
 
+type SeededEntry = {
+  sender: string;
+  body: string;
+  timestamp?: number;
+  id?: string;
+  senderJid?: string;
+};
+
+// Patch P: seed groupHistories from wacli's local store on listener startup,
+// so restarts don't wipe the agent's group context. Best-effort and non-blocking;
+// soft-fails if wacli is missing or its session differs from OC's.
+async function seedGroupHistoriesFromWacli(params: {
+  groupHistories: Map<string, SeededEntry[]>;
+  groupHistoryLimit: number;
+  accountId: string | undefined;
+}): Promise<void> {
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const execFileP = promisify(execFile);
+
+  const run = async (args: string[], timeoutMs: number): Promise<string | null> => {
+    try {
+      const { stdout } = await execFileP("wacli", args, {
+        timeout: timeoutMs,
+        maxBuffer: 16 * 1024 * 1024,
+      });
+      return stdout;
+    } catch {
+      return null;
+    }
+  };
+
+  const chatsJson = await run(["chats", "list", "--json"], 10_000);
+  if (!chatsJson) {
+    logVerbose("wacli warmup: wacli not available or chats list failed; skipping");
+    return;
+  }
+  let chatsParsed: { success?: boolean; data?: Array<{ JID?: string; Kind?: string }> };
+  try {
+    chatsParsed = JSON.parse(chatsJson);
+  } catch {
+    return;
+  }
+  if (!chatsParsed?.success || !Array.isArray(chatsParsed.data)) {
+    return;
+  }
+  const groups = chatsParsed.data.filter(
+    (c): c is { JID: string; Kind: string } =>
+      c?.Kind === "group" && typeof c?.JID === "string" && c.JID.length > 0,
+  );
+
+  const nameCache = new Map<string, string>();
+  const resolveName = async (jid: string): Promise<string> => {
+    const cached = nameCache.get(jid);
+    if (cached !== undefined) return cached;
+    const out = await run(["contacts", "show", "--jid", jid, "--json"], 3_000);
+    let name = "";
+    if (out) {
+      try {
+        const parsed = JSON.parse(out) as { data?: { Name?: string; Alias?: string } };
+        name = parsed?.data?.Alias || parsed?.data?.Name || "";
+      } catch {
+        /* ignore */
+      }
+    }
+    if (!name) {
+      const local = jid.split("@")[0] ?? "";
+      name = local.split(":")[0] || jid;
+    }
+    nameCache.set(jid, name);
+    return name;
+  };
+
+  let seededMessages = 0;
+  let seededGroups = 0;
+  for (const group of groups) {
+    const msgsOut = await run(
+      [
+        "messages",
+        "list",
+        "--chat",
+        group.JID,
+        "--limit",
+        String(params.groupHistoryLimit),
+        "--json",
+      ],
+      10_000,
+    );
+    if (!msgsOut) continue;
+    let msgsParsed: {
+      data?: {
+        messages?: Array<{
+          MsgID?: string;
+          SenderJID?: string;
+          Timestamp?: string;
+          Text?: string;
+          DisplayText?: string;
+        }>;
+      };
+    };
+    try {
+      msgsParsed = JSON.parse(msgsOut);
+    } catch {
+      continue;
+    }
+    const msgs = msgsParsed?.data?.messages;
+    if (!Array.isArray(msgs) || msgs.length === 0) continue;
+
+    const key = buildGroupHistoryKey({
+      channel: "whatsapp",
+      accountId: params.accountId ?? null,
+      peerKind: "group",
+      peerId: group.JID,
+    });
+    const existing = params.groupHistories.get(key) ?? [];
+    const existingIds = new Set(
+      existing.map((e) => e.id).filter((id): id is string => Boolean(id)),
+    );
+
+    // wacli returns newest-first; reverse to oldest-first for chronological history.
+    const seeded: SeededEntry[] = [];
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      const m = msgs[i];
+      const body = String(m.DisplayText || m.Text || "").trim();
+      if (!body) continue;
+      if (m.MsgID && existingIds.has(m.MsgID)) continue;
+      const senderJid = typeof m.SenderJID === "string" ? m.SenderJID : "";
+      const sender = senderJid ? await resolveName(senderJid) : "Unknown";
+      const tsParsed = m.Timestamp ? Date.parse(m.Timestamp) : Number.NaN;
+      seeded.push({
+        sender,
+        body,
+        timestamp: Number.isFinite(tsParsed) ? tsParsed : undefined,
+        id: m.MsgID || undefined,
+        senderJid: senderJid || undefined,
+      });
+    }
+
+    if (seeded.length === 0) continue;
+    // Preserve any live entries that may have arrived concurrently; seed goes first
+    // so live entries keep their position at the end (most recent).
+    const merged = [...seeded, ...existing].slice(-params.groupHistoryLimit);
+    params.groupHistories.set(key, merged);
+    seededMessages += seeded.length;
+    seededGroups += 1;
+  }
+
+  logVerbose(
+    `wacli warmup: seeded ${seededMessages} messages across ${seededGroups}/${groups.length} groups`,
+  );
+}
+
 export async function monitorWebChannel(
   verbose: boolean,
   listenerFactory: typeof monitorWebInbox | undefined = monitorWebInbox,
@@ -139,6 +291,16 @@ export async function monitorWebChannel(
   const groupMemberNames = new Map<string, Map<string, string>>();
   const echoTracker = createEchoTracker({ maxItems: 100, logVerbose });
 
+  // Patch P: warm in-memory groupHistories from wacli's local store so the agent
+  // doesn't lose group context across restarts. Fire-and-forget; soft-fails.
+  void seedGroupHistoriesFromWacli({
+    groupHistories,
+    groupHistoryLimit,
+    accountId: account.accountId,
+  }).catch((err) => {
+    logVerbose(`wacli warmup failed: ${String(err)}`);
+  });
+
   const sleep =
     tuning.sleep ??
     ((ms: number, signal?: AbortSignal) => sleepWithAbort(ms, signal ?? abortSignal));
@@ -175,7 +337,7 @@ export async function monitorWebChannel(
 
     // Watchdog to detect stuck message processing (e.g., event emitter died).
     // Tuning overrides are test-oriented; production defaults remain unchanged.
-    const MESSAGE_TIMEOUT_MS = tuning.messageTimeoutMs ?? 30 * 60 * 1000; // 30m default
+    const MESSAGE_TIMEOUT_MS = tuning.messageTimeoutMs ?? 3 * 60 * 60 * 1000; // 3h default
     const WATCHDOG_CHECK_MS = tuning.watchdogCheckMs ?? 60 * 1000; // 1m default
 
     const onMessage = createWebOnMessageHandler({
