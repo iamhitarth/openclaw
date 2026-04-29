@@ -43,7 +43,7 @@ export function resolveDiscordOutboundSessionRoute(
   const threadKeys = resolveThreadSessionKeys({
     baseSessionKey,
     threadId: threadCandidate,
-    useSuffix: false,
+    useSuffix: true,
   });
   return {
     sessionKey: threadKeys.sessionKey,

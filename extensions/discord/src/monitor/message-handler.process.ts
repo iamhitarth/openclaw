@@ -33,6 +33,7 @@ import {
   buildPendingHistoryContextFromMap,
   clearHistoryEntriesIfEnabled,
 } from "openclaw/plugin-sdk/reply-history";
+import type { HistoryEntry } from "openclaw/plugin-sdk/reply-history";
 import { resolveSendableOutboundReplyParts } from "openclaw/plugin-sdk/reply-payload";
 import { buildAgentSessionKey, resolveThreadSessionKeys } from "openclaw/plugin-sdk/routing";
 import { danger, logVerbose, shouldLogVerbose } from "openclaw/plugin-sdk/runtime-env";
@@ -49,7 +50,7 @@ import { resolveDiscordDraftStreamingChunking } from "../draft-chunking.js";
 import { createDiscordDraftStream } from "../draft-stream.js";
 import { resolveDiscordPreviewStreamMode } from "../preview-streaming.js";
 import { removeReactionDiscord } from "../send.js";
-import { editMessageDiscord } from "../send.messages.js";
+import { editMessageDiscord, readMessagesDiscord } from "../send.messages.js";
 import {
   createDiscordAckReactionAdapter,
   createDiscordAckReactionContext,
@@ -111,6 +112,7 @@ export async function processDiscordMessage(
     accountId,
     token,
     runtime,
+    botUserId,
     guildHistories,
     historyLimit,
     mediaMaxBytes,
@@ -311,6 +313,48 @@ export async function processDiscordMessage(
   });
   const shouldIncludeChannelHistory =
     !isDirectMessage && !(isGuildMessage && channelConfig?.autoThread && !threadChannel);
+
+  // Seed guild history from Discord API when in-memory map is empty (e.g. after restart)
+  if (
+    shouldIncludeChannelHistory &&
+    historyLimit > 0 &&
+    !guildHistories.get(messageChannelId)?.length
+  ) {
+    try {
+      const fetchLimit = Math.min(historyLimit, 50);
+      const recentMessages = await readMessagesDiscord(
+        messageChannelId,
+        { limit: fetchLimit, before: message.id },
+        { rest: client.rest },
+      );
+      if (recentMessages.length > 0) {
+        const seededEntries: HistoryEntry[] = recentMessages
+          .toReversed()
+          .filter((msg) => msg.content?.trim())
+          .map((msg) => ({
+            sender:
+              botUserId && msg.author?.id === botUserId
+                ? "assistant"
+                : ((msg as { member?: { nick?: string } }).member?.nick ??
+                  msg.author?.global_name ??
+                  msg.author?.username ??
+                  "unknown"),
+            body: msg.content ?? "",
+            timestamp: msg.timestamp ? new Date(msg.timestamp).getTime() : undefined,
+            messageId: msg.id,
+          }));
+        if (seededEntries.length > 0) {
+          guildHistories.set(messageChannelId, seededEntries);
+          logVerbose(
+            `discord: seeded ${seededEntries.length} history entries for ${messageChannelId} from API`,
+          );
+        }
+      }
+    } catch (err) {
+      logVerbose(`discord: failed to seed channel history for ${messageChannelId}: ${String(err)}`);
+    }
+  }
+
   if (shouldIncludeChannelHistory) {
     combinedBody = buildPendingHistoryContextFromMap({
       historyMap: guildHistories,
@@ -399,7 +443,7 @@ export async function processDiscordMessage(
     baseSessionKey,
     threadId: threadChannel ? messageChannelId : undefined,
     parentSessionKey,
-    useSuffix: false,
+    useSuffix: true,
   });
   const replyPlan = await resolveDiscordAutoThreadReplyPlan({
     client,
