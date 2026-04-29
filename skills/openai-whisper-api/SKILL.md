@@ -1,31 +1,22 @@
 ---
 name: openai-whisper-api
-description: Transcribe audio via OpenAI Audio Transcriptions API (Whisper).
+description: Transcribe audio via Groq or OpenAI Audio Transcriptions API.
 homepage: https://platform.openai.com/docs/guides/speech-to-text
 metadata:
   {
     "openclaw":
       {
-        "emoji": "🌐",
-        "requires": { "bins": ["curl"], "env": ["OPENAI_API_KEY"] },
-        "primaryEnv": "OPENAI_API_KEY",
-        "install":
-          [
-            {
-              "id": "brew",
-              "kind": "brew",
-              "formula": "curl",
-              "bins": ["curl"],
-              "label": "Install curl (brew)",
-            },
-          ],
+        "emoji": "☁️",
+        "requires": { "bins": ["curl"] },
       },
   }
 ---
 
-# OpenAI Whisper API (curl)
+# Audio Transcription (Groq / OpenAI)
 
-Transcribe an audio file via OpenAI’s `/v1/audio/transcriptions` endpoint. Set `OPENAI_BASE_URL` to use an OpenAI-compatible proxy or local gateway.
+Transcribe an audio file via Groq or OpenAI's `/v1/audio/transcriptions` endpoint.
+
+**Provider priority:** Groq (faster & cheaper) if `GROQ_API_KEY` is set, otherwise OpenAI.
 
 ## Quick start
 
@@ -35,28 +26,21 @@ Transcribe an audio file via OpenAI’s `/v1/audio/transcriptions` endpoint. Set
 
 Defaults:
 
-- Model: `whisper-1`
+- Provider: Groq (if `GROQ_API_KEY` set), else OpenAI
+- Model: `whisper-large-v3-turbo` (Groq) / `gpt-4o-mini-transcribe` (OpenAI)
 - Output: `<input>.txt`
 
 ## Useful flags
 
 ```bash
-{baseDir}/scripts/transcribe.sh /path/to/audio.ogg --model whisper-1 --out /tmp/transcript.txt
+{baseDir}/scripts/transcribe.sh /path/to/audio.ogg --provider openai    # force OpenAI
+{baseDir}/scripts/transcribe.sh /path/to/audio.ogg --model whisper-1    # specific model
+{baseDir}/scripts/transcribe.sh /path/to/audio.m4a --out /tmp/transcript.txt
 {baseDir}/scripts/transcribe.sh /path/to/audio.m4a --language en
 {baseDir}/scripts/transcribe.sh /path/to/audio.m4a --prompt "Speaker names: Peter, Daniel"
 {baseDir}/scripts/transcribe.sh /path/to/audio.m4a --json --out /tmp/transcript.json
 ```
 
-## API key
+## API keys
 
-Set `OPENAI_API_KEY`, or configure it in the active OpenClaw config file (`$OPENCLAW_CONFIG_PATH`, default `~/.openclaw/openclaw.json`). Optionally set `OPENAI_BASE_URL` (for example `http://127.0.0.1:51805/v1`) to use an OpenAI-compatible proxy or local gateway:
-
-```json5
-{
-  skills: {
-    "openai-whisper-api": {
-      apiKey: "OPENAI_KEY_HERE",
-    },
-  },
-}
-```
+Set `GROQ_API_KEY` (preferred) or `OPENAI_API_KEY` in `~/.openclaw/.env`.

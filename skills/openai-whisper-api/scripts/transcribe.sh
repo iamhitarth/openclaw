@@ -4,7 +4,7 @@ set -euo pipefail
 usage() {
   cat >&2 <<'EOF'
 Usage:
-  transcribe.sh <audio-file> [--model whisper-1] [--out /path/to/out.txt] [--language en] [--prompt "hint"] [--json]
+  transcribe.sh <audio-file> [--model whisper-large-v3-turbo] [--out /path/to/out.txt] [--language en] [--prompt "hint"] [--json] [--provider groq|openai]
 EOF
   exit 2
 }
@@ -16,7 +16,8 @@ fi
 in="${1:-}"
 shift || true
 
-model="whisper-1"
+provider=""
+model=""
 out=""
 language=""
 prompt=""
@@ -24,6 +25,10 @@ response_format="text"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --provider)
+      provider="${2:-}"
+      shift 2
+      ;;
     --model)
       model="${2:-}"
       shift 2
@@ -56,10 +61,42 @@ if [[ ! -f "$in" ]]; then
   exit 1
 fi
 
-if [[ "${OPENAI_API_KEY:-}" == "" ]]; then
-  echo "Missing OPENAI_API_KEY" >&2
-  exit 1
+# Auto-detect provider: prefer Groq (faster & cheaper), fall back to OpenAI
+if [[ -z "$provider" ]]; then
+  if [[ -n "${GROQ_API_KEY:-}" ]]; then
+    provider="groq"
+  elif [[ -n "${OPENAI_API_KEY:-}" ]]; then
+    provider="openai"
+  else
+    echo "Missing GROQ_API_KEY or OPENAI_API_KEY" >&2
+    exit 1
+  fi
 fi
+
+case "$provider" in
+  groq)
+    api_key="${GROQ_API_KEY:-}"
+    base_url="https://api.groq.com/openai/v1"
+    [[ -z "$model" ]] && model="whisper-large-v3-turbo"
+    if [[ -z "$api_key" ]]; then
+      echo "Missing GROQ_API_KEY" >&2
+      exit 1
+    fi
+    ;;
+  openai)
+    api_key="${OPENAI_API_KEY:-}"
+    base_url="https://api.openai.com/v1"
+    [[ -z "$model" ]] && model="gpt-4o-mini-transcribe"
+    if [[ -z "$api_key" ]]; then
+      echo "Missing OPENAI_API_KEY" >&2
+      exit 1
+    fi
+    ;;
+  *)
+    echo "Unknown provider: $provider (use groq or openai)" >&2
+    exit 1
+    ;;
+esac
 
 if [[ "$out" == "" ]]; then
   base="${in%.*}"
@@ -72,11 +109,8 @@ fi
 
 mkdir -p "$(dirname "$out")"
 
-api_base="${OPENAI_BASE_URL:-https://api.openai.com/v1}"
-api_base="${api_base%/}"
-
-curl -sS "${api_base}/audio/transcriptions" \
-  -H "Authorization: Bearer $OPENAI_API_KEY" \
+curl -sS "${base_url}/audio/transcriptions" \
+  -H "Authorization: Bearer $api_key" \
   -H "Accept: application/json" \
   -F "file=@${in}" \
   -F "model=${model}" \
