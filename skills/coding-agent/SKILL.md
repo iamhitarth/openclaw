@@ -162,6 +162,87 @@ Optional additions:
 
 ---
 
+## 📚 Advanced Patterns
+
+For environment bootstrapping, completion verification, triage, and escalation patterns, see `references/agent-patterns.md`.
+
+---
+
+## 🎯 Spawn Protocol (Required)
+
+Before spawning a coding agent, structure your task with these elements to avoid the **consensus illusion problem** (where you and the agent think you agreed but understood different things).
+
+### Task Template
+
+Include these sections in your prompt to the agent:
+
+```markdown
+## Task
+
+[Clear description of what needs to be built/fixed]
+
+## Success Criteria
+
+- [ ] Criterion 1 (verifiable - can be tested/checked)
+- [ ] Criterion 2 (verifiable)
+- [ ] Criterion 3 (verifiable)
+
+## Boundary
+
+Your responsibility ends when: [explicit boundary]
+Escalate if: [conditions that should trigger asking for help]
+
+## Context Already Gathered
+
+- Tried X: [result]
+- Checked Y: [result]
+- Assumption: [what you're assuming to be true]
+
+## Verification Loop
+
+Before reporting done, verify all success criteria are met.
+If blocked, report what was tried and why it failed.
+```
+
+### Why This Matters
+
+Without explicit criteria:
+
+- Agent thinks "done" means "code compiles"
+- You expected "done" means "tests pass and edge cases handled"
+- Handshake succeeded. Work failed.
+
+### Completion Report Template
+
+When the agent finishes (or you report back to the user), include:
+
+```markdown
+## Outcome: [success/partial/blocked]
+
+## What Was Done
+
+✓ Step 1: [result]
+✓ Step 2: [result]
+✗ Step 3: [failed because...]
+
+## What Was Ruled Out
+
+- Option A: didn't pursue because [reason]
+- Option B: tried, failed because [reason]
+
+## Confidence: [high/medium/low]
+
+## If Blocked: [specific input needed]
+```
+
+This creates **reasoning traces** that:
+
+1. Help the user understand what happened
+2. Serve as potential training data later
+3. Avoid "context abandonment" on handoff
+
+---
+
 ## Quick Start
 
 For scratch Codex work, create a temp git repo first, then start the worker in the background with the completion route injected into the prompt:
