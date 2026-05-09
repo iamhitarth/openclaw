@@ -45,7 +45,7 @@ export function resolveDiscordOutboundSessionRoute(
     },
     threadId: params.threadId,
     precedence: ["threadId"],
-    useSuffix: false,
+    useSuffix: true,
   });
 }
 
