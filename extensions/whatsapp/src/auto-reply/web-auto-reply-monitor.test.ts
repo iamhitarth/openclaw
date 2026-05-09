@@ -175,7 +175,7 @@ describe("applyGroupGating", () => {
     expect(result.shouldProcess).toBe(false);
   });
 
-  it("still treats reply-to-bot as implicit mention in selfChatMode when sender is a different user", async () => {
+  it("does not treat reply-to-self-number as implicit mention in selfChatMode when sender is a different user", async () => {
     const cfg = makeConfig({
       channels: {
         whatsapp: {
@@ -192,21 +192,21 @@ describe("applyGroupGating", () => {
         id: "m-other-reply",
         to: "+15550000",
         accountId: "default",
-        body: "following up on bot reply",
+        body: "following up on your message",
         timestamp: Date.now(),
         senderE164: "+15559999999",
         senderJid: "15559999999@s.whatsapp.net",
         selfJid: "15551234567@s.whatsapp.net",
         selfE164: "+15551234567",
         replyToId: "m0",
-        replyToBody: "bot earlier response",
+        replyToBody: "owner or agent earlier response",
         replyToSender: "+15551234567",
         replyToSenderJid: "15551234567@s.whatsapp.net",
         replyToSenderE164: "+15551234567",
       }),
     });
 
-    expect(result.shouldProcess).toBe(true);
+    expect(result.shouldProcess).toBe(false);
   });
 
   it("processes explicit group @mentions when self is in allowFrom (#49317)", async () => {
