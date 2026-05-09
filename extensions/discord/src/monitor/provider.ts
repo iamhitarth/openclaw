@@ -25,6 +25,7 @@ import { loadConfig } from "openclaw/plugin-sdk/config-runtime";
 import { createConnectedChannelStatusPatch } from "openclaw/plugin-sdk/gateway-runtime";
 import { getPluginCommandSpecs } from "openclaw/plugin-sdk/plugin-runtime";
 import { resolveTextChunkLimit } from "openclaw/plugin-sdk/reply-chunking";
+import type { HistoryEntry } from "openclaw/plugin-sdk/reply-history";
 import {
   danger,
   isVerbose,
