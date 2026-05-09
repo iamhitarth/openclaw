@@ -875,30 +875,44 @@ export async function attachWebInboxToSocket(
   );
 
   void (async () => {
-    try {
-      const groups = await sock.groupFetchAllParticipating();
-      for (const [jid, meta] of Object.entries(groups ?? {})) {
-        if (meta) {
-          rememberGroupMetadataCacheEntry(
-            groupMetadataCache,
-            jid,
-            summarizeGroupMetaForReconnectCache(meta),
-          );
-        }
+    const delaysMs = [0, 2000, 5000, 10000];
+    let lastError: unknown;
+    for (let attempt = 0; attempt < delaysMs.length; attempt++) {
+      if (delaysMs[attempt] > 0) {
+        await new Promise((r) => setTimeout(r, delaysMs[attempt]));
       }
-      logWhatsAppVerbose(
-        options.verbose,
-        `Hydrated ${Object.keys(groups ?? {}).length} participating groups on connect`,
-      );
-    } catch (err) {
-      const error = String(err);
-      inboundLogger.warn({ error }, "failed hydrating participating groups on connect");
-      inboundConsoleLog.warn(`Failed hydrating participating groups on connect: ${error}`);
-      logWhatsAppVerbose(
-        options.verbose,
-        `Failed to hydrate participating groups on connect: ${error}`,
-      );
+      try {
+        const groups = await sock.groupFetchAllParticipating();
+        for (const [jid, meta] of Object.entries(groups ?? {})) {
+          if (meta) {
+            rememberGroupMetadataCacheEntry(
+              groupMetadataCache,
+              jid,
+              summarizeGroupMetaForReconnectCache(meta),
+            );
+          }
+        }
+        logWhatsAppVerbose(
+          options.verbose,
+          `Hydrated ${Object.keys(groups ?? {}).length} participating groups on connect` +
+            (attempt > 0 ? ` (attempt ${attempt + 1})` : ""),
+        );
+        return;
+      } catch (err) {
+        lastError = err;
+        logWhatsAppVerbose(
+          options.verbose,
+          `Group hydration attempt ${attempt + 1} failed: ${String(err)}`,
+        );
+      }
     }
+    const error = String(lastError);
+    inboundLogger.warn({ error }, "failed hydrating participating groups on connect");
+    inboundConsoleLog.warn(`Failed hydrating participating groups on connect: ${error}`);
+    logWhatsAppVerbose(
+      options.verbose,
+      `Failed to hydrate participating groups on connect: ${error}`,
+    );
   })();
 
   const sendApi = createWebSendApi({
