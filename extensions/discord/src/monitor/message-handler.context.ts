@@ -6,7 +6,10 @@ import { resolveChannelContextVisibilityMode } from "openclaw/plugin-sdk/context
 import { resolvePinnedMainDmOwnerFromAllowlist } from "openclaw/plugin-sdk/conversation-runtime";
 import { isDangerousNameMatchingEnabled } from "openclaw/plugin-sdk/dangerous-name-runtime";
 import { finalizeInboundContext } from "openclaw/plugin-sdk/reply-dispatch-runtime";
-import { buildPendingHistoryContextFromMap } from "openclaw/plugin-sdk/reply-history";
+import {
+  buildPendingHistoryContextFromMap,
+  type HistoryEntry,
+} from "openclaw/plugin-sdk/reply-history";
 import { buildAgentSessionKey, resolveThreadSessionKeys } from "openclaw/plugin-sdk/routing";
 import { danger, logVerbose, shouldLogVerbose } from "openclaw/plugin-sdk/runtime-env";
 import { evaluateSupplementalContextVisibility } from "openclaw/plugin-sdk/security-runtime";
@@ -14,6 +17,7 @@ import { readSessionUpdatedAt, resolveStorePath } from "openclaw/plugin-sdk/sess
 import { truncateUtf16Safe } from "openclaw/plugin-sdk/text-runtime";
 import { resolveDiscordConversationIdentity } from "../conversation-identity.js";
 import { ChannelType } from "../internal/discord.js";
+import { readMessagesDiscord } from "../send.messages.js";
 import { normalizeDiscordAllowList, normalizeDiscordSlug } from "./allow-list.js";
 import { resolveTimestampMs } from "./format.js";
 import {
@@ -46,6 +50,7 @@ export async function buildDiscordMessageProcessContext(params: {
     discordConfig,
     accountId,
     runtime,
+    botUserId,
     guildHistories,
     historyLimit,
     replyToMode,
@@ -151,6 +156,48 @@ export async function buildDiscordMessageProcessContext(params: {
   });
   const shouldIncludeChannelHistory =
     !isDirectMessage && !(isGuildMessage && channelConfig?.autoThread && !threadChannel);
+
+  // Seed guild history from Discord API when in-memory map is empty (e.g. after restart)
+  if (
+    shouldIncludeChannelHistory &&
+    historyLimit > 0 &&
+    !guildHistories.get(messageChannelId)?.length
+  ) {
+    try {
+      const fetchLimit = Math.min(historyLimit, 50);
+      const recentMessages = await readMessagesDiscord(
+        messageChannelId,
+        { limit: fetchLimit, before: message.id },
+        { rest: client.rest },
+      );
+      if (recentMessages.length > 0) {
+        const seededEntries: HistoryEntry[] = recentMessages
+          .toReversed()
+          .filter((msg) => msg.content?.trim())
+          .map((msg) => ({
+            sender:
+              botUserId && msg.author?.id === botUserId
+                ? "assistant"
+                : ((msg as { member?: { nick?: string } }).member?.nick ??
+                  msg.author?.global_name ??
+                  msg.author?.username ??
+                  "unknown"),
+            body: msg.content ?? "",
+            timestamp: msg.timestamp ? new Date(msg.timestamp).getTime() : undefined,
+            messageId: msg.id,
+          }));
+        if (seededEntries.length > 0) {
+          guildHistories.set(messageChannelId, seededEntries);
+          logVerbose(
+            `discord: seeded ${seededEntries.length} history entries for ${messageChannelId} from API`,
+          );
+        }
+      }
+    } catch (err) {
+      logVerbose(`discord: failed to seed channel history for ${messageChannelId}: ${String(err)}`);
+    }
+  }
+
   if (shouldIncludeChannelHistory) {
     combinedBody = buildPendingHistoryContextFromMap({
       historyMap: guildHistories,
@@ -247,7 +294,7 @@ export async function buildDiscordMessageProcessContext(params: {
     baseSessionKey,
     threadId: threadChannel ? messageChannelId : undefined,
     parentSessionKey,
-    useSuffix: false,
+    useSuffix: true,
   });
   const replyPlan = await resolveDiscordAutoThreadReplyPlan({
     client,

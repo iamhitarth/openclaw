@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import type { ChannelRuntimeSurface } from "openclaw/plugin-sdk/channel-contract";
 import {
   listNativeCommandSpecsForConfig,
@@ -10,6 +12,7 @@ import {
   resolveNativeSkillsEnabled,
 } from "openclaw/plugin-sdk/native-command-config-runtime";
 import { resolveTextChunkLimit } from "openclaw/plugin-sdk/reply-chunking";
+import type { HistoryEntry } from "openclaw/plugin-sdk/reply-history";
 import { getRuntimeConfig } from "openclaw/plugin-sdk/runtime-config-snapshot";
 import { isVerbose, logVerbose, shouldLogVerbose, warn } from "openclaw/plugin-sdk/runtime-env";
 import { createSubsystemLogger } from "openclaw/plugin-sdk/runtime-env";
@@ -21,6 +24,7 @@ import {
   warnMissingProviderGroupPolicyFallbackOnce,
 } from "openclaw/plugin-sdk/runtime-group-policy";
 import { formatErrorMessage } from "openclaw/plugin-sdk/ssrf-runtime";
+import { resolveStateDir } from "openclaw/plugin-sdk/state-paths";
 import {
   resolveDiscordAccount,
   resolveDiscordAccountAllowFrom,
@@ -82,6 +86,46 @@ type DiscordVoiceManager = import("../voice/manager.js").DiscordVoiceManager;
 
 type DiscordVoiceRuntimeModule = typeof import("../voice/manager.runtime.js");
 type DiscordProviderSessionRuntimeModule = typeof import("./provider-session.runtime.js");
+
+function resolveHistoryCachePath(): string {
+  return path.join(resolveStateDir(), "discord-history-cache.json");
+}
+
+function loadGuildHistoriesFromDisk(): Map<string, HistoryEntry[]> {
+  const map = new Map<string, HistoryEntry[]>();
+  try {
+    const cachePath = resolveHistoryCachePath();
+    if (!fs.existsSync(cachePath)) {
+      return map;
+    }
+    const raw = JSON.parse(fs.readFileSync(cachePath, "utf-8")) as Record<string, HistoryEntry[]>;
+    for (const [key, entries] of Object.entries(raw)) {
+      if (Array.isArray(entries) && entries.length > 0) {
+        map.set(key, entries);
+      }
+    }
+    logVerbose(`discord: loaded ${map.size} channel histories from disk cache`);
+  } catch (err) {
+    logVerbose(`discord: failed to load history cache: ${String(err)}`);
+  }
+  return map;
+}
+
+function saveGuildHistoriesToDisk(histories: Map<string, HistoryEntry[]>): void {
+  try {
+    const cachePath = resolveHistoryCachePath();
+    const obj: Record<string, HistoryEntry[]> = {};
+    for (const [key, entries] of histories) {
+      if (entries.length > 0) {
+        obj[key] = entries.slice(-50);
+      }
+    }
+    fs.writeFileSync(cachePath, JSON.stringify(obj), "utf-8");
+    logVerbose(`discord: saved ${Object.keys(obj).length} channel histories to disk cache`);
+  } catch (err) {
+    logVerbose(`discord: failed to save history cache: ${String(err)}`);
+  }
+}
 
 let discordVoiceRuntimePromise: Promise<DiscordVoiceRuntimeModule> | undefined;
 let discordProviderSessionRuntimePromise: Promise<DiscordProviderSessionRuntimeModule> | undefined;
@@ -385,6 +429,7 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
       );
     }
   }
+  const guildHistories = loadGuildHistoriesFromDisk();
   let lifecycleStarted = false;
   let gatewaySupervisor: ReturnType<typeof createDiscordGatewaySupervisor> | undefined;
   let deactivateMessageHandler: (() => void) | undefined;
@@ -475,10 +520,6 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
     });
 
     const logger = createSubsystemLogger("discord/monitor");
-    const guildHistories = new Map<
-      string,
-      import("openclaw/plugin-sdk/reply-history").HistoryEntry[]
-    >();
     let { botUserId, botUserName } = await fetchDiscordBotIdentity({
       client,
       token,
@@ -599,6 +640,7 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
       gatewayRuntimeReadyTimeoutMs: account.config.gatewayRuntimeReadyTimeoutMs,
     });
   } finally {
+    saveGuildHistoriesToDisk(guildHistories);
     cleanupDiscordProviderStartup({
       deactivateMessageHandler,
       autoPresenceController,
