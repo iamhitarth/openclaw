@@ -7,6 +7,7 @@ import type { GatewayTailscaleMode } from "../config/types.gateway.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { hasConfiguredInternalHooks } from "../hooks/configured.js";
 import { isTruthyEnvValue } from "../infra/env.js";
+import { scanStrandedFinalDeliveries } from "../infra/stranded-final-delivery-scan.js";
 import type { scheduleGatewayUpdateCheck } from "../infra/update-startup.js";
 import type { getGlobalHookRunner } from "../plugins/hook-runner-global.js";
 import type { PluginHookGatewayCronService } from "../plugins/hook-types.js";
@@ -816,6 +817,17 @@ export async function startGatewayPostAttachRuntime(
         startupTrace: params.startupTrace,
         log: params.log,
         refreshLatestUpdateRestartSentinel: runtimeDeps.refreshLatestUpdateRestartSentinel,
+      });
+      // Sessions whose `pendingFinalDelivery` marker was written but never
+      // cleared (run-time crash, silent dispatch loss, etc.) are otherwise
+      // only surfaced by an aggressive heartbeat schedule. Log them once on
+      // startup so operators can spot a stranded reply before the user does.
+      // See coding-agent-logs/2026-04-19_richa-silent-replies-rca.md.
+      void scanStrandedFinalDeliveries({
+        cfg: params.cfgAtStart,
+        log: params.log,
+      }).catch((err) => {
+        params.log.warn(`[stranded-final-delivery] startup scan threw (non-fatal): ${String(err)}`);
       });
       if (!hasGatewayStartHooks(sidecarsResult.pluginRegistry)) {
         return;
