@@ -278,6 +278,20 @@ export type SessionEntry = {
   /** Original delivery context (channel, recipient, etc). */
   pendingFinalDeliveryContext?: DeliveryContext;
   /**
+   * Cooperative claim string for a single re-dispatch attempt; format
+   * `<owner>-<ms-epoch>`. Used to dedupe between the startup scan and the
+   * heartbeat replay path so they cannot both fire the same payload. Treated
+   * as stale (and ignored) once older than 30s — a crashed claimant must not
+   * pin the marker forever. See `src/infra/stranded-final-delivery-scan.ts`.
+   */
+  pendingFinalDeliveryClaimedBy?: string | null;
+  /**
+   * Hard retry counter incremented each time the startup scan re-dispatches
+   * and fails. After 3 attempts the marker is cleared (with a hard warn) so
+   * a permanently-broken channel does not pollute every gateway startup.
+   */
+  pendingFinalDeliveryRetryCount?: number;
+  /**
    * Whether totalTokens reflects a fresh context snapshot for the latest run.
    * Undefined means legacy/unknown freshness; false forces consumers to treat
    * totalTokens as stale/unknown for context-utilization displays.

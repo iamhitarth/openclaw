@@ -150,6 +150,8 @@ async function markSessionFailed(params: {
       entry.pendingFinalDeliveryAttemptCount = undefined;
       entry.pendingFinalDeliveryLastError = undefined;
       entry.pendingFinalDeliveryContext = undefined;
+      entry.pendingFinalDeliveryClaimedBy = undefined;
+      entry.pendingFinalDeliveryRetryCount = undefined;
       store[params.sessionKey] = entry;
     },
     { skipMaintenance: true },

@@ -318,6 +318,18 @@ export async function getReplyFromConfig(
     // If it's a user message, we deliver the lost reply first, then continue.
     // For now, let's just return the lost reply if it's a heartbeat.
     if (opts?.isHeartbeat) {
+      // Cooperative dedupe with the startup re-dispatch scan
+      // (`src/infra/stranded-final-delivery-scan.ts`). If another path is in
+      // the middle of replaying this marker we skip; the heartbeat will fire
+      // again on its next tick if delivery still has not succeeded.
+      const claimSuffix = sessionEntry.pendingFinalDeliveryClaimedBy;
+      if (typeof claimSuffix === "string" && claimSuffix.length > 0) {
+        const claimTsMatch = claimSuffix.match(/-(\d+)$/);
+        const claimedAt = claimTsMatch ? Number(claimTsMatch[1]) : 0;
+        if (Number.isFinite(claimedAt) && Date.now() - claimedAt < 30_000) {
+          return undefined;
+        }
+      }
       const updatedAt = Date.now();
       const attemptCount = (sessionEntry.pendingFinalDeliveryAttemptCount ?? 0) + 1;
       sessionEntry.pendingFinalDeliveryLastAttemptAt = updatedAt;
