@@ -744,6 +744,176 @@ describe("runWithModelFallback", () => {
     ).toBeNull();
   });
 
+  // Local patch #7 regression coverage — provider HTTP errors must classify
+  // as candidate failures so the fallback chain continues and the session
+  // store does not get pinned to a broken candidate. See 2026-05-22 RCA.
+  it("classifies non-GPT raw provider 400 error payloads as candidate failures", () => {
+    const runResult: EmbeddedPiRunResult = {
+      payloads: [
+        {
+          text: "Google Generative AI API error (400): unable to submit request because it has an empty text parameter",
+          isError: true,
+        },
+      ],
+      meta: {
+        durationMs: 1,
+      },
+    };
+
+    const classification = classifyEmbeddedPiRunResultForModelFallback({
+      provider: "google",
+      model: "gemini-flash-latest",
+      result: runResult,
+    });
+
+    expect(classification).not.toBeNull();
+    expect(classification).toMatchObject({
+      code: "provider_http_error",
+      reason: "format",
+    });
+    expect((classification as { message?: string } | null)?.message).toMatch(
+      /google\/gemini-flash-latest/i,
+    );
+  });
+
+  it("classifies leading-HTTP-status error payloads with the parsed status code", () => {
+    const runResult: EmbeddedPiRunResult = {
+      payloads: [
+        {
+          text: "HTTP 503: provider temporarily unavailable",
+          isError: true,
+        },
+      ],
+      meta: {
+        durationMs: 1,
+      },
+    };
+
+    // OC maps a raw 503 to "timeout" (transport failure) unless the message
+    // explicitly says "overloaded"; we surface the parsed status code in the
+    // result code while reusing the existing failover reason vocabulary.
+    expect(
+      classifyEmbeddedPiRunResultForModelFallback({
+        provider: "anthropic",
+        model: "claude-opus-4-7",
+        result: runResult,
+      }),
+    ).toMatchObject({
+      code: "provider_http_503",
+      status: 503,
+      reason: "timeout",
+    });
+  });
+
+  it("does not over-trigger on plain warning error payloads without provider markers", () => {
+    const runResult: EmbeddedPiRunResult = {
+      payloads: [
+        {
+          text: "⚠️ tool foo failed",
+          isError: true,
+        },
+      ],
+      meta: {
+        durationMs: 1,
+      },
+    };
+
+    expect(
+      classifyEmbeddedPiRunResultForModelFallback({
+        provider: "anthropic",
+        model: "claude-opus-4-7",
+        result: runResult,
+      }),
+    ).toBeNull();
+  });
+
+  it("continues to next candidate when fallback chain produces a 400 from one provider", async () => {
+    const cfg = makeCfg({
+      agents: {
+        defaults: {
+          model: {
+            primary: "openai-codex/gpt-5.4",
+            fallbacks: ["google/gemini-flash-latest", "anthropic/claude-haiku-3-5"],
+          },
+        },
+      },
+    });
+    const runEmbedded = vi
+      .fn()
+      .mockResolvedValueOnce({
+        payloads: [
+          {
+            text: "Google Generative AI API error (400): empty text parameter",
+            isError: true,
+          },
+        ],
+        meta: { durationMs: 1 },
+      })
+      .mockResolvedValueOnce({
+        payloads: [{ text: "ok from anthropic" }],
+        meta: { durationMs: 2 },
+      });
+
+    const result = await runWithModelFallback({
+      cfg,
+      provider: "google",
+      model: "gemini-flash-latest",
+      run: runEmbedded,
+      classifyResult: ({ result, provider, model }) =>
+        classifyEmbeddedPiRunResultForModelFallback({ provider, model, result }),
+    });
+
+    expect(runEmbedded).toHaveBeenCalledTimes(2);
+    expect(runEmbedded.mock.calls[1]).toEqual(["anthropic", "claude-haiku-3-5"]);
+    expect(result.provider).toBe("anthropic");
+    expect(result.model).toBe("claude-haiku-3-5");
+    expect(result.attempts[0]).toMatchObject({
+      provider: "google",
+      model: "gemini-flash-latest",
+      code: "provider_http_error",
+      reason: "format",
+    });
+  });
+
+  it("does not roll session-pin forward when all candidates return provider errors", async () => {
+    const cfg = makeCfg({
+      agents: {
+        defaults: {
+          model: {
+            primary: "google/gemini-flash-latest",
+            fallbacks: [],
+          },
+        },
+      },
+    });
+    const runEmbedded = vi.fn().mockResolvedValueOnce({
+      payloads: [
+        {
+          text: "Google Generative AI API error (400): empty text parameter",
+          isError: true,
+        },
+      ],
+      meta: { durationMs: 1 },
+    });
+
+    await expect(
+      runWithModelFallback({
+        cfg,
+        provider: "google",
+        model: "gemini-flash-latest",
+        run: runEmbedded,
+        classifyResult: ({ result, provider, model }) =>
+          classifyEmbeddedPiRunResultForModelFallback({ provider, model, result }),
+      }),
+    ).rejects.toMatchObject({
+      name: "FailoverError",
+      reason: "format",
+      code: "provider_http_error",
+      provider: "google",
+      model: "gemini-flash-latest",
+    });
+  });
+
   it("passes original unknown errors to onError during fallback", async () => {
     const cfg = makeCfg();
     const unknownError = new Error("provider misbehaved");
